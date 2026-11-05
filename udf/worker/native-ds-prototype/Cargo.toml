@@ -1,0 +1,30 @@
+[package]
+name = "native-ds-prototype"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.91"
+license = "Apache-2.0"
+publish = false
+description = "Prototype: a UdfWorker that serves the calls of spark_datasource.h over UdfWorker/Execute"
+
+[[bin]]
+name = "native-ds-worker"
+path = "src/main.rs"
+
+[dependencies]
+arrow-array = { version = "60.1", features = ["ffi"] }
+arrow-data = { version = "60.1", features = ["ffi"] }
+arrow-ipc = "60.1"
+arrow-schema = { version = "60.1", features = ["ffi"] }
+libloading = "0.8"
+prost = "0.14"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+tonic = "0.14"
+tonic-prost = "0.14"
+
+[build-dependencies]
+tonic-prost-build = "0.14"
+
+[profile.release]
+debug = 1

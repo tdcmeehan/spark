@@ -1,0 +1,190 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+syntax = "proto3";
+
+// PROTOTYPE, not a stable interface: the calls of spark_datasource.h (version 1) over the
+// UdfWorker/Execute stream of the UDF worker protocol, which this encoding does not change.
+//
+// Each Execute stream carries one call. Init.udf.format is "spark.native_datasource.prototype.v0"
+// and Init.udf.payload a Request; InitResponse.data is the Reply, then the engine sends Finish.
+// A Read also streams its batches: each DataResponse.data holds the Arrow IPC messages of one
+// batch (its dictionary batches, then its record batch), and FinishResponse.data is a ReadEnd.
+//
+// A Reply mirrors what the C function returned, including a failure (status and last_error), so
+// that Spark reports it as it does in process. ExecutionError is only for what no C function
+// returns: a failure of a callback of the stream of a read, or of the worker itself.
+package spark.native_datasource.prototype.v0;
+
+option java_package = "org.apache.spark.sql.execution.datasources.v2.ffi.prototype";
+option java_multiple_files = true;
+
+message Request {
+  oneof call {
+    Load load = 1;
+    Create create = 2;
+    Schema schema = 3;
+    CreateReader create_reader = 4;
+    Close close = 5;
+    PushLimit push_limit = 6;
+    PruneColumns prune_columns = 7;
+    Partitions partitions = 8;
+    SerializeReader serialize_reader = 9;
+    CloseReader close_reader = 10;
+    Read read = 11;
+  }
+}
+
+// Loads the library at a path of the worker, once for each path, and calls spark_ds_init.
+message Load {
+  string path = 1;
+  string spark_version = 2;
+}
+
+message Create {
+  uint64 library = 1;
+  string name = 2;
+  repeated string option_keys = 3;
+  repeated string option_values = 4;
+}
+
+message Schema {
+  uint64 source = 1;
+}
+
+message CreateReader {
+  uint64 source = 1;
+  // An Arrow IPC schema message.
+  bytes schema = 2;
+}
+
+message Close {
+  uint64 source = 1;
+}
+
+message PushLimit {
+  uint64 reader = 1;
+  int32 limit = 2;
+}
+
+message PruneColumns {
+  uint64 reader = 1;
+  repeated string columns = 2;
+}
+
+message Partitions {
+  uint64 reader = 1;
+}
+
+message SerializeReader {
+  uint64 reader = 1;
+}
+
+message CloseReader {
+  uint64 reader = 1;
+}
+
+// The fields of SparkDsTaskContext. The worker answers is_interrupted from the Cancel of the
+// stream.
+message TaskContext {
+  int32 stage_id = 1;
+  int32 stage_attempt_number = 2;
+  int32 partition_id = 3;
+  int32 attempt_number = 4;
+  int64 task_attempt_id = 5;
+}
+
+message Read {
+  uint64 library = 1;
+  TaskContext task = 2;
+  bytes reader_state = 3;
+  bytes partition = 4;
+}
+
+message Reply {
+  // The int that the function returned, 0 on success, and 0 for the functions that return void.
+  int32 status = 1;
+  // last_error after a failure, unless the library leaves last_error NULL or it returned NULL.
+  optional string last_error = 2;
+  // The messages that the library logged on the thread of the call, during the call.
+  repeated LogRecord logs = 3;
+  oneof value {
+    Loaded loaded = 10;
+    Created created = 11;
+    // An Arrow IPC schema message.
+    bytes schema = 12;
+    // A handle of the worker, 0 if the library returned a NULL handle.
+    uint64 handle = 13;
+    // applied for push_limit, pruned for prune_columns.
+    bool flag = 14;
+    Sunk sunk = 15;
+    Opened opened = 16;
+  }
+}
+
+message Loaded {
+  oneof outcome {
+    Library library = 1;
+    // The library could not be opened, with the reason.
+    string cannot_open = 2;
+    // The library does not export spark_ds_init.
+    bool no_init = 3;
+    // spark_ds_init failed with Reply.status.
+    bool init_failed = 4;
+    // spark_ds_init succeeded without returning a table.
+    bool no_table = 5;
+  }
+}
+
+message Library {
+  uint64 id = 1;
+  int64 table_size = 2;
+  int32 abi_version = 3;
+  // The functions of the table that fit in its size and are not NULL, by their field names. None
+  // if the table is of another version.
+  repeated string functions = 4;
+}
+
+message Created {
+  uint64 capabilities = 1;
+  // 0 if the library returned a NULL handle.
+  uint64 source = 2;
+}
+
+// The byte arrays that the function passed to its SparkDsSink, in order.
+message Sunk {
+  repeated bytes values = 1;
+}
+
+message Opened {
+  // Whether read initialized the stream with all its callbacks. The worker released it if not.
+  bool initialized = 1;
+  // The schema of the stream, an Arrow IPC schema message, if get_schema succeeded.
+  bytes schema = 2;
+  // The error of get_schema, if it failed. The worker then released the stream.
+  optional string schema_error = 3;
+}
+
+message LogRecord {
+  int32 level = 1;
+  string message = 2;
+}
+
+message ReadEnd {
+  // The messages that the library logged on the thread of the read, after the Reply.
+  repeated LogRecord logs = 1;
+}

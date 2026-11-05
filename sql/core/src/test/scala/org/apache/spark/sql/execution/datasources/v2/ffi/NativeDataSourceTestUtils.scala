@@ -65,7 +65,7 @@ object NativeDataSourceTestUtils {
   }
 
   private def build(name: String, defines: Seq[String]): File = {
-    val (compiler, includes) = toolchain.get
+    val (compiler, includes) = this.compiler.get
     val source = new File(buildDir, "test_native_datasource.cc")
     if (!source.exists()) {
       val in = getClass.getClassLoader

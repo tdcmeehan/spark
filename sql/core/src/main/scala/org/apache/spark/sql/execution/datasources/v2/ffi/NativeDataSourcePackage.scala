@@ -37,6 +37,7 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.internal.LogKeys.{PATH, VERSION_NUM}
 import org.apache.spark.sql.Artifact
 import org.apache.spark.sql.errors.QueryExecutionErrors
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.util.Utils
 
 /**
@@ -437,20 +438,24 @@ object NativeLibraries extends Logging {
   // by their canonical path, with the checksum of the build that was loaded, so that each library
   // file is loaded once. A library that is loaded but rejected stays loaded, so its error is kept:
   // it is not loaded again.
-  private val packagedLibraries = new ConcurrentHashMap[String, Try[NativeLibrary]]()
-  private val installedLibraries = new ConcurrentHashMap[String, (String, Try[NativeLibrary])]()
+  // A library that a worker loaded is another library, so the keys start with the worker.
+  private val packagedLibraries = new ConcurrentHashMap[String, Try[NativeDataSourceLibrary]]()
+  private val installedLibraries =
+    new ConcurrentHashMap[String, (String, Try[NativeDataSourceLibrary])]()
 
   private lazy val extractionDir: File = Utils.createTempDir(namePrefix = "native-datasources")
 
   /** Returns the library at the given location, and loads it if needed. */
-  private[ffi] def get(location: NativeLibraryLocation): NativeLibrary = {
-    // The libraries are called with the FFM API, which is final only from Java 22.
-    if (!NativeLibrary.isSupported) {
+  private[ffi] def get(location: NativeLibraryLocation): NativeDataSourceLibrary = {
+    val worker = SQLConf.get.getConf(SQLConf.NATIVE_DATA_SOURCE_PROTOTYPE_REMOTE_WORKER)
+    // The libraries are called with the FFM API, which is final only from Java 22, unless a
+    // worker calls them.
+    if (worker.isEmpty && !NativeLibrary.isSupported) {
       throw QueryExecutionErrors.nativeDataSourceUnsupportedJavaVersionError(
         NativeLibrary.MINIMUM_JAVA_VERSION, Runtime.version().feature())
     }
     checkCDataInterface()
-    getSupported(location)
+    getSupported(location, worker)
   }
 
   /**
@@ -470,14 +475,18 @@ object NativeLibraries extends Logging {
     }
   }
 
-  private def getSupported(location: NativeLibraryLocation): NativeLibrary = location match {
+  private def getSupported(
+      location: NativeLibraryLocation,
+      worker: Option[String]): NativeDataSourceLibrary = location match {
     case pkg: NativeDataSourcePackage =>
-      getOrLoad(packagedLibraries, pkg.sha256)(loadPackaged(pkg)).get
+      getOrLoad(packagedLibraries, cacheKey(worker, pkg.sha256))(loadPackaged(pkg, worker)).get
     case installed: InstalledNativeLibrary =>
       // The file has the checksum of the build of the driver.
       val file = locate(installed).getCanonicalFile
       val (loadedChecksum, library) =
-        getOrLoad(installedLibraries, file.getPath)(installed.sha256 -> loadInstalled(file))
+        getOrLoad(installedLibraries, cacheKey(worker, file.getPath)) {
+          installed.sha256 -> loadInstalled(file, worker)
+        }
       // The JVM cannot load another build from the same path: the library was replaced since.
       if (loadedChecksum != installed.sha256) {
         throw QueryExecutionErrors.invalidNativeDataSourceLibraryError(
@@ -488,13 +497,18 @@ object NativeLibraries extends Logging {
       library.get
   }
 
+  private def cacheKey(worker: Option[String], key: String): String =
+    worker.map(w => s"$w|$key").getOrElse(key)
+
   private def getOrLoad[T](libraries: ConcurrentHashMap[String, T], key: String)(
       load: => T): T = {
     val library = libraries.get(key)
     if (library != null) library else libraries.computeIfAbsent(key, _ => load)
   }
 
-  private def loadPackaged(pkg: NativeDataSourcePackage): Try[NativeLibrary] = {
+  private def loadPackaged(
+      pkg: NativeDataSourcePackage,
+      worker: Option[String]): Try[NativeDataSourceLibrary] = {
     val platform = NativePlatform.current
     val libraryPath = pkg.manifest.libraries.getOrElse(platform, {
       throw NativeDataSourcePackage.unsupportedPlatformError(pkg.path, pkg.manifest)
@@ -506,15 +520,17 @@ object NativeLibraries extends Logging {
     }
     load(
       libraryFile,
+      worker,
       (reason, cause) => QueryExecutionErrors.invalidNativeDataSourcePackageError(
         pkg.path, "INVALID_LIBRARY", Map("library" -> libraryPath, "reason" -> reason), cause),
       parameters => QueryExecutionErrors.invalidNativeDataSourcePackageError(
         pkg.path, "UNSUPPORTED_ABI_VERSION", parameters))
   }
 
-  private def loadInstalled(file: File): Try[NativeLibrary] = {
+  private def loadInstalled(file: File, worker: Option[String]): Try[NativeDataSourceLibrary] = {
     load(
       file,
+      worker,
       (reason, cause) => QueryExecutionErrors.invalidNativeDataSourceLibraryError(
         file.getPath, "CANNOT_LOAD", Map("reason" -> reason), cause),
       parameters => QueryExecutionErrors.invalidNativeDataSourceLibraryError(
@@ -532,11 +548,15 @@ object NativeLibraries extends Logging {
    */
   private def load(
       file: File,
+      worker: Option[String],
       invalidLibrary: (String, Throwable) => Throwable,
-      unsupportedAbiVersion: Map[String, String] => Throwable): Try[NativeLibrary] = {
+      unsupportedAbiVersion: Map[String, String] => Throwable): Try[NativeDataSourceLibrary] = {
     logInfo(log"Loading the native data source library ${MDC(PATH, file)}.")
     val library = try {
-      NativeLibrary.load(file.getPath, SPARK_VERSION)
+      worker match {
+        case Some(address) => RemoteNativeLibrary.load(address, file.getPath, SPARK_VERSION)
+        case None => NativeLibrary.load(file.getPath, SPARK_VERSION)
+      }
     } catch {
       // A library that was loaded stays loaded, and Spark must not initialize it again.
       case e: NativeLibrary.LoadException if e.loaded =>

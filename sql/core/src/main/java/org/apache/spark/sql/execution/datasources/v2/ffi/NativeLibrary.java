@@ -55,7 +55,7 @@ import org.apache.spark.unsafe.Platform;
  * {@link MissingFunctionException}. A function that fails throws a {@link RuntimeException} with
  * the message of {@code last_error}.
  */
-final class NativeLibrary {
+final class NativeLibrary extends NativeDataSourceLibrary {
 
   private static final SparkLogger LOGGER = SparkLoggerFactory.getLogger(NativeLibrary.class);
 
@@ -475,7 +475,16 @@ final class NativeLibrary {
    */
   private static void log(String path, int level, long message) {
     try {
-      String text = message == 0 ? "" : new String(readCString(message), StandardCharsets.UTF_8);
+      log(path, level,
+        message == 0 ? "" : new String(readCString(message), StandardCharsets.UTF_8));
+    } catch (Throwable e) {
+      // The message is lost.
+    }
+  }
+
+  /** Logs a message of the library at the given path, at one of the SPARK_DS_LOG_* levels. */
+  static void log(String path, int level, String text) {
+    try {
       switch (level) {
         case 1 -> LOGGER.error("Native data source library {}: {}",
           MDC.of(LogKeys.PATH, path), MDC.of(LogKeys.MESSAGE, text));
@@ -690,7 +699,7 @@ final class NativeLibrary {
       throws Throwable {
     MethodHandle f = function(Function.READ);
     try (Memory memory = new Memory()) {
-      check((int) f.invokeExact(task.address, memory.bytes(readerState),
+      check((int) f.invokeExact(task.address(), memory.bytes(readerState),
         (long) readerState.length, memory.bytes(partition), (long) partition.length,
         streamAddress), Function.READ);
     }
@@ -733,7 +742,7 @@ final class NativeLibrary {
     MethodHandle f = function(Function.CREATE_DATA_WRITER);
     try (Memory memory = new Memory()) {
       long out = memory.zeroed(8);
-      check((int) f.invokeExact(task.address, memory.bytes(writerState),
+      check((int) f.invokeExact(task.address(), memory.bytes(writerState),
         (long) writerState.length, epochId, out), Function.CREATE_DATA_WRITER);
       return readHandle(out, Function.CREATE_DATA_WRITER);
     }
@@ -856,7 +865,13 @@ final class NativeLibrary {
    * the data writer closes it once the library no longer uses it, which frees it.
    */
   static final class Task implements AutoCloseable {
-    final long address;
+    final int stageId;
+    final int stageAttemptNumber;
+    final int partitionId;
+    final int attemptNumber;
+    final long taskAttemptId;
+    final BooleanSupplier interrupted;
+    private long address;
     private boolean closed;
 
     Task(
@@ -866,25 +881,43 @@ final class NativeLibrary {
         int attemptNumber,
         long taskAttemptId,
         BooleanSupplier interrupted) {
-      address = Platform.allocateMemory(TASK_SIZE);
-      Platform.setMemory(address, (byte) 0, TASK_SIZE);
-      Platform.putLong(null, address, TASK_SIZE);
-      Platform.putInt(null, address + TASK_STAGE_ID, stageId);
-      Platform.putInt(null, address + TASK_STAGE_ATTEMPT_NUMBER, stageAttemptNumber);
-      Platform.putInt(null, address + TASK_PARTITION_ID, partitionId);
-      Platform.putInt(null, address + TASK_ATTEMPT_NUMBER, attemptNumber);
-      Platform.putLong(null, address + TASK_ATTEMPT_ID, taskAttemptId);
-      Platform.putLong(null, address + TASK_IS_INTERRUPTED, Ffm.IS_INTERRUPTED);
-      tasks.put(address, interrupted);
+      this.stageId = stageId;
+      this.stageAttemptNumber = stageAttemptNumber;
+      this.partitionId = partitionId;
+      this.attemptNumber = attemptNumber;
+      this.taskAttemptId = taskAttemptId;
+      this.interrupted = interrupted;
+    }
+
+    /**
+     * The address of the struct, allocated when a library in process first needs it, so that a
+     * library called elsewhere does not initialize the FFM API.
+     */
+    synchronized long address() {
+      if (address == 0) {
+        address = Platform.allocateMemory(TASK_SIZE);
+        Platform.setMemory(address, (byte) 0, TASK_SIZE);
+        Platform.putLong(null, address, TASK_SIZE);
+        Platform.putInt(null, address + TASK_STAGE_ID, stageId);
+        Platform.putInt(null, address + TASK_STAGE_ATTEMPT_NUMBER, stageAttemptNumber);
+        Platform.putInt(null, address + TASK_PARTITION_ID, partitionId);
+        Platform.putInt(null, address + TASK_ATTEMPT_NUMBER, attemptNumber);
+        Platform.putLong(null, address + TASK_ATTEMPT_ID, taskAttemptId);
+        Platform.putLong(null, address + TASK_IS_INTERRUPTED, Ffm.IS_INTERRUPTED);
+        tasks.put(address, interrupted);
+      }
+      return address;
     }
 
     @Override
-    public void close() {
+    public synchronized void close() {
       if (!closed) {
         closed = true;
-        // A call to is_interrupted that is still running only looks the address up.
-        tasks.remove(address);
-        Platform.freeMemory(address);
+        if (address != 0) {
+          // A call to is_interrupted that is still running only looks the address up.
+          tasks.remove(address);
+          Platform.freeMemory(address);
+        }
       }
     }
   }

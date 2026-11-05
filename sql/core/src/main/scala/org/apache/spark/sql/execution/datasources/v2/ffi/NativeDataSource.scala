@@ -148,7 +148,7 @@ class NativeDataSource(
   }
 
   /** Runs `f` with a new native data source, which is closed afterwards. */
-  private def withDataSource[T](library: NativeLibrary, action: String)(
+  private def withDataSource[T](library: NativeDataSourceLibrary, action: String)(
       f: NativeLibrary.DataSourceHandle => T): T = {
     // Checked first, so that a data source is never created without a way to release it.
     requireFunctions(library, action, Seq(NativeLibrary.Function.CLOSE))
@@ -171,7 +171,7 @@ class NativeDataSource(
    * capability, or if the library does not implement the functions that it requires.
    */
   private def create(
-      library: NativeLibrary,
+      library: NativeDataSourceLibrary,
       action: String,
       capability: Long,
       unsupportedError: String,
@@ -188,7 +188,7 @@ class NativeDataSource(
 
   /** Creates a writer for a batch write, or for a streaming write with the ID of its query. */
   private def createWriter(
-      library: NativeLibrary,
+      library: NativeDataSourceLibrary,
       schema: StructType,
       overwrite: Boolean,
       queryId: String): Long = {
@@ -214,7 +214,7 @@ class NativeDataSource(
   }
 
   private def requireFunctions(
-      library: NativeLibrary,
+      library: NativeDataSourceLibrary,
       action: String,
       functions: Seq[NativeLibrary.Function]): Unit = {
     functions.find(!library.hasFunction(_)).foreach { function =>
@@ -222,7 +222,9 @@ class NativeDataSource(
     }
   }
 
-  private def serializeWriter(library: NativeLibrary, handle: NativeHandle): Array[Byte] = {
+  private def serializeWriter(
+      library: NativeDataSourceLibrary,
+      handle: NativeHandle): Array[Byte] = {
     try {
       bytesOrEmpty(call(name, "plan a write to")(optional(library.serializeWriter(handle.get))))
     } catch {
@@ -253,7 +255,7 @@ object NativeDataSource {
  * @param executorLocation where the executors find the library
  */
 class NativeBatchPlanner(
-    library: NativeLibrary,
+    library: NativeDataSourceLibrary,
     executorLocation: NativeLibraryLocation,
     name: String,
     schema: StructType,

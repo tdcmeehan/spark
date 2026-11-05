@@ -7511,6 +7511,18 @@ object SQLConf {
     .toSequence
     .createWithDefault(Nil)
 
+  val NATIVE_DATA_SOURCE_PROTOTYPE_REMOTE_WORKER =
+    buildConf("spark.sql.dataSource.native.prototype.remoteWorker")
+      .internal()
+      .doc("PROTOTYPE: the host:port of a UDF worker that loads and calls the native data " +
+        "source libraries instead of the JVM, over the UdfWorker/Execute stream of the UDF " +
+        "worker protocol. The worker loads each library at the path where Spark finds it. Only " +
+        "batch reads are supported.")
+      .version("4.4.0")
+      .withBindingPolicy(ConfigBindingPolicy.SESSION)
+      .stringConf
+      .createOptional
+
   val CSV_FILTER_PUSHDOWN_ENABLED = buildConf("spark.sql.csv.filterPushdown.enabled")
     .doc("When true, enable filter pushdown to CSV datasource.")
     .version("3.0.0")

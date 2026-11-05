@@ -102,8 +102,12 @@ class NativeDataSourceSuite extends QueryTest with SharedSparkSession {
     session
   }
 
+  protected def canLoadLibraries: Boolean = toolchain.isDefined
+
+  protected def librariesRequirement: String = "A C++ compiler and Java 22 or later are required."
+
   private def nativeTest(name: String)(f: => Unit): Unit = test(name) {
-    assume(toolchain.isDefined, "A C++ compiler and Java 22 or later are required.")
+    assume(canLoadLibraries, librariesRequirement)
     try f finally SparkSession.setActiveSession(spark)
   }
 
