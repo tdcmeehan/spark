@@ -56,7 +56,7 @@ import org.apache.spark.sql.util.ArrowUtils;
  */
 final class RemoteNativeLibrary extends NativeDataSourceLibrary {
 
-  private final String address;
+  final String address;
   // The path of the library, which the worker loads, for the logs of the library.
   private final String path;
   // The ID of the library in the worker.

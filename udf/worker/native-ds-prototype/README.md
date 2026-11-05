@@ -19,9 +19,16 @@ fields. Writes and streaming are not implemented.
   so Spark reports it as it does in process. An `ExecutionError` is a failure of the worker or of a
   callback of a read's stream.
 - Libraries and handles are IDs unique to the worker process. A call that reaches another worker,
-  or one that restarted, fails with "has no ... handle" rather than using another object.
+  or one that restarted, fails with "The worker has no ..." rather than using another object.
 - The worker calls `get_next` only once the engine sends `Finish`, because `GrpcWorkerSession`
   cancels a session on an `ErrorResponse` that comes before `process()`, and the error is lost.
+- The driver decides where a scan's library runs when it plans the scan, and sends that to the
+  executors with the reader state: a task only gets the SQL configuration of its session within a
+  SQL execution, so a job such as `df.rdd.pipe(...)` would otherwise read in process.
+- The JVM waits for the worker on threads that Spark does not interrupt. `GrpcWorkerSession`
+  cancels its stream when its thread is interrupted, as `PipedRDD` does to its writer thread when
+  its task completes, while Spark cannot interrupt a library in process, which only learns that its
+  task was killed from `is_interrupted`.
 
 The calls are mapped to messages in one place on each side, so a new version of the interface, such
 as apache/spark#59931, changes those places only: `RemoteNativeLibrary.java` in Spark, and

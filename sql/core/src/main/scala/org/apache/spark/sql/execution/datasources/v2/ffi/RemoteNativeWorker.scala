@@ -19,13 +19,14 @@ package org.apache.spark.sql.execution.datasources.v2.ffi
 import java.io.{ByteArrayOutputStream, IOException, PrintWriter}
 import java.nio.ByteBuffer
 import java.nio.channels.{Channels, ReadableByteChannel}
-import java.util.concurrent.{ConcurrentHashMap, ScheduledFuture, TimeUnit}
+import java.util.concurrent.{Callable, ConcurrentHashMap, ExecutionException, ScheduledFuture, TimeUnit}
 import java.util.function.BooleanSupplier
 
 import scala.jdk.CollectionConverters._
 import scala.util.Try
 import scala.util.control.NonFatal
 
+import com.google.common.util.concurrent.Uninterruptibles
 import com.google.protobuf.ByteString
 import org.apache.arrow.c.{ArrowArrayStream, Data}
 import org.apache.arrow.vector.ipc.{ArrowStreamReader, ReadChannel, WriteChannel}
@@ -56,6 +57,21 @@ private[ffi] object RemoteNativeWorker {
     ThreadUtils.newDaemonSingleThreadScheduledExecutor("native-ds-remote-interruptions")
   private[ffi] lazy val cancellations =
     ThreadUtils.newDaemonCachedThreadPool("native-ds-remote-cancel")
+
+  // The streams wait on these threads, which Spark does not interrupt: an interrupt makes the UDF
+  // session cancel its stream, while Spark cannot interrupt a library in process, which only learns
+  // that its task was killed from is_interrupted.
+  private lazy val waiters = ThreadUtils.newDaemonCachedThreadPool("native-ds-remote-wait")
+
+  private[ffi] def uninterruptibly[T](f: => T): T = {
+    try {
+      Uninterruptibles.getUninterruptibly(waiters.submit(new Callable[T] {
+        override def call(): T = f
+      }))
+    } catch {
+      case e: ExecutionException => throw e.getCause
+    }
+  }
 
   private def dispatcher(address: String): WorkerDispatcher = {
     dispatchers.computeIfAbsent(address, _ => {
@@ -89,7 +105,7 @@ private[ffi] object RemoteNativeWorker {
    * Makes a call whose Reply completes it: Init, InitResponse, Finish, FinishResponse. Logs what
    * the library logged during the call.
    */
-  def call(address: String, path: String, request: Request): Reply = {
+  def call(address: String, path: String, request: Request): Reply = uninterruptibly {
     val session = dispatcher(address).createSession(None)
     try {
       val reply = initialize(session, address, request)
@@ -111,7 +127,7 @@ private[ffi] object RemoteNativeWorker {
   def openRead(address: String, path: String, request: Request): RemoteRead = {
     val session = dispatcher(address).createSession(None)
     val reply = try {
-      initialize(session, address, request)
+      uninterruptibly(initialize(session, address, request))
     } catch {
       case e: Throwable =>
         session.close()
@@ -197,7 +213,7 @@ private[ffi] class RemoteRead(
 
   private[ffi] def nextBatch(): Option[ByteString] = {
     try {
-      if (responses.hasNext) Some(responses.next().getData) else None
+      uninterruptibly(if (responses.hasNext) Some(responses.next().getData) else None)
     } catch {
       case NonFatal(e) => throw new RemoteReadException(message(address, e), e)
     }

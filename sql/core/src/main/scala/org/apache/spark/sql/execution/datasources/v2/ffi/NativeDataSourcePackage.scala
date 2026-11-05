@@ -446,8 +446,23 @@ object NativeLibraries extends Logging {
   private lazy val extractionDir: File = Utils.createTempDir(namePrefix = "native-datasources")
 
   /** Returns the library at the given location, and loads it if needed. */
-  private[ffi] def get(location: NativeLibraryLocation): NativeDataSourceLibrary = {
-    val worker = SQLConf.get.getConf(SQLConf.NATIVE_DATA_SOURCE_PROTOTYPE_REMOTE_WORKER)
+  private[ffi] def get(location: NativeLibraryLocation): NativeDataSourceLibrary =
+    get(location, configuredWorker())
+
+  /** The worker of the session that loads and calls the libraries, if any (a prototype). */
+  private[ffi] def configuredWorker(): Option[String] =
+    SQLConf.get.getConf(SQLConf.NATIVE_DATA_SOURCE_PROTOTYPE_REMOTE_WORKER)
+
+  /** The worker that calls a library, or None if the JVM calls it. */
+  private[ffi] def workerOf(library: NativeDataSourceLibrary): Option[String] = library match {
+    case remote: RemoteNativeLibrary => Some(remote.address)
+    case _ => None
+  }
+
+  /** Returns the library at the given location, called in process or by the given worker. */
+  private[ffi] def get(
+      location: NativeLibraryLocation,
+      worker: Option[String]): NativeDataSourceLibrary = {
     // The libraries are called with the FFM API, which is final only from Java 22, unless a
     // worker calls them.
     if (worker.isEmpty && !NativeLibrary.isSupported) {

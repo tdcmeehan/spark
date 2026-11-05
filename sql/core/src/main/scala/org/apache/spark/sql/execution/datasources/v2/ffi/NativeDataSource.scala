@@ -286,7 +286,8 @@ class NativeBatchPlanner(
         call(name, "plan a scan of")(optional(library.serializeReader(handle.get))))
       ColumnarPlannedBatch(
         NativeInputPartition.from(partitions),
-        new NativePartitionReaderFactory(executorLocation, name, readerState, readSchema))
+        new NativePartitionReaderFactory(
+          executorLocation, name, readerState, readSchema, NativeLibraries.workerOf(library)))
     } finally {
       // The executors only need the serialized state.
       handle.close()
@@ -294,16 +295,23 @@ class NativeBatchPlanner(
   }
 }
 
-/** Reads the partitions of a planned batch scan of a native data source, on the executors. */
+/**
+ * Reads the partitions of a planned batch scan of a native data source, on the executors.
+ *
+ * @param worker the worker that planned the scan, which reads its partitions too, or None if the
+ *               JVM did. It is decided on the driver, since a task only gets the SQL configuration
+ *               of the session within a SQL execution.
+ */
 class NativePartitionReaderFactory(
     location: NativeLibraryLocation,
     name: String,
     readerState: Array[Byte],
-    readSchema: StructType)
+    readSchema: StructType,
+    worker: Option[String])
   extends ColumnarOnlyPartitionReaderFactory {
   override def createColumnarReader(partition: InputPartition): PartitionReader[ColumnarBatch] = {
-    new NativePartitionReader(
-      location, name, readerState, partition.asInstanceOf[NativeInputPartition].bytes, readSchema)
+    new NativePartitionReader(location, name, readerState,
+      partition.asInstanceOf[NativeInputPartition].bytes, readSchema, worker)
   }
 }
 
@@ -486,7 +494,8 @@ class NativePartitionReader(
     name: String,
     readerState: Array[Byte],
     partition: Array[Byte],
-    schema: StructType)
+    schema: StructType,
+    worker: Option[String] = NativeLibraries.configuredWorker())
   extends PartitionReader[ColumnarBatch] {
   import NativeCalls._
 
@@ -522,7 +531,7 @@ class NativePartitionReader(
   }
 
   private def openStream(): Unit = {
-    val library = NativeLibraries.get(location)
+    val library = NativeLibraries.get(location, worker)
     task = NativeTask.create()
     call(name, "read")(library.read(task, readerState, partition, stream.memoryAddress()))
   }

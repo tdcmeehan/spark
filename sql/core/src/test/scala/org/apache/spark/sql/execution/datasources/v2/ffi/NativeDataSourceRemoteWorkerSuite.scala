@@ -20,12 +20,16 @@ import java.io.{BufferedReader, File, InputStreamReader}
 import java.nio.charset.StandardCharsets.UTF_8
 import java.util.concurrent.TimeUnit
 
+import scala.jdk.CollectionConverters._
+
 import org.scalactic.source.Position
 import org.scalatest.Tag
 
 import org.apache.spark.{SPARK_VERSION, SparkConf}
 import org.apache.spark.sql.execution.datasources.v2.ffi.prototype.{Create, Request}
 import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.apache.spark.util.Utils
 
 /**
@@ -81,6 +85,28 @@ class NativeDataSourceRemoteWorkerSuite extends NativeDataSourceSuite {
     } finally {
       other.stop()
     }
+  }
+
+  test("read a planned scan with the worker that planned it") {
+    assume(canLoadLibraries, librariesRequirement)
+    import NativeDataSourceTestUtils._
+    val pkg = NativeDataSourcePackage.read(
+      createPackage(compile("test_native_datasource"), dataSources("")))
+    val options = new CaseInsensitiveStringMap(Map("end" -> "3", "partitions" -> "1").asJava)
+    val planned = new NativeDataSource(pkg, "native_range", options)
+      .batchPlanner(StructType.fromDDL("id BIGINT")).plan()
+    // A task only gets the configuration of the session in a SQL execution: here, no worker runs.
+    val conf = new SQLConf
+    conf.setConfString(SQLConf.NATIVE_DATA_SOURCE_PROTOTYPE_REMOTE_WORKER.key, "127.0.0.1:1")
+    val rows = SQLConf.withExistingConf(conf) {
+      val reader = planned.readerFactory.createColumnarReader(planned.partitions.head)
+      try {
+        Iterator.continually(reader.next()).takeWhile(identity).map(_ => reader.get().numRows()).sum
+      } finally {
+        reader.close()
+      }
+    }
+    assert(rows == 3)
   }
 
   override def afterAll(): Unit = {
