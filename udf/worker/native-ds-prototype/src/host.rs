@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::hash::{BuildHasher, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::abi::{Function, InitFn, LastErrorFn, SparkDsHost, ABI_VERSION, TABLE_FUNCTIONS};
 use crate::proto::ds::LogRecord;
@@ -83,7 +83,6 @@ pub struct Libraries {
     // never initialized again. A library that could not be opened is tried again.
     by_path: Mutex<HashMap<String, Loaded>>,
     by_id: Mutex<HashMap<u64, Arc<Library>>>,
-    next_id: AtomicU64,
     // Rejected libraries, which must not be unloaded.
     rejected: Mutex<Vec<libloading::Library>>,
 }
@@ -148,7 +147,7 @@ impl Libraries {
             }
         }
         Loaded::Library(Arc::new(Library {
-            id: self.next_id.fetch_add(1, Ordering::Relaxed) + 1,
+            id: new_id(),
             table_size,
             abi_version,
             functions,
@@ -217,32 +216,17 @@ struct Entry {
     pointer: usize,
 }
 
-/// The handles that the libraries returned, by an ID that is unique to this worker process, so
-/// that a handle of another process is reported as unknown rather than used.
+/// The handles that the libraries returned, by an ID of this worker process.
+#[derive(Default)]
 pub struct Handles {
     entries: Mutex<HashMap<u64, Entry>>,
-    seed: u64,
-    counter: AtomicU64,
-}
-
-impl Default for Handles {
-    fn default() -> Self {
-        let mut hasher = RandomState::new().build_hasher();
-        hasher.write_u32(std::process::id());
-        Self { entries: Mutex::default(), seed: hasher.finish(), counter: AtomicU64::new(0) }
-    }
 }
 
 impl Handles {
     pub fn insert(&self, kind: Kind, library: Arc<Library>, pointer: *mut c_void) -> u64 {
-        let mut entries = self.entries.lock().unwrap();
-        loop {
-            let id = splitmix64(self.seed ^ self.counter.fetch_add(1, Ordering::Relaxed));
-            if id != 0 && !entries.contains_key(&id) {
-                entries.insert(id, Entry { kind, library, pointer: pointer as usize });
-                return id;
-            }
-        }
+        let id = new_id();
+        self.entries.lock().unwrap().insert(id, Entry { kind, library, pointer: pointer as usize });
+        id
     }
 
     pub fn get(&self, id: u64, kind: Kind) -> Result<(Arc<Library>, *mut c_void), String> {
@@ -272,6 +256,25 @@ fn unknown(id: u64, kind: Kind) -> String {
     )
 }
 
+/// A new ID for a library or a handle, unique to this worker process: an ID that another
+/// process returned, as before a restart, is reported as unknown rather than used.
+fn new_id() -> u64 {
+    static SEED: OnceLock<u64> = OnceLock::new();
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let seed = *SEED.get_or_init(|| {
+        let mut hasher = RandomState::new().build_hasher();
+        hasher.write_u32(std::process::id());
+        hasher.finish()
+    });
+    loop {
+        let id = splitmix64(seed ^ COUNTER.fetch_add(1, Ordering::Relaxed));
+        if id != 0 {
+            return id;
+        }
+    }
+}
+
+// A bijection of u64, so that the IDs of a process never repeat.
 fn splitmix64(x: u64) -> u64 {
     let mut z = x.wrapping_add(0x9e37_79b9_7f4a_7c15);
     z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);

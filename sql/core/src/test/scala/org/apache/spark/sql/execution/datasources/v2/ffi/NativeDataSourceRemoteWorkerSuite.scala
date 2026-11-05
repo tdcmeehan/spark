@@ -23,7 +23,8 @@ import java.util.concurrent.TimeUnit
 import org.scalactic.source.Position
 import org.scalatest.Tag
 
-import org.apache.spark.SparkConf
+import org.apache.spark.{SPARK_VERSION, SparkConf}
+import org.apache.spark.sql.execution.datasources.v2.ffi.prototype.{Create, Request}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.util.Utils
 
@@ -55,6 +56,30 @@ class NativeDataSourceRemoteWorkerSuite extends NativeDataSourceSuite {
     super.test(testName, testTags: _*) {
       notRun.get(testName).foreach(reason => cancel(s"Not run with a worker: $reason"))
       testFun
+    }
+  }
+
+  test("a worker rejects the IDs of another worker process") {
+    assume(canLoadLibraries, librariesRequirement)
+    val other = startWorker().get
+    try {
+      val path = NativeDataSourceTestUtils.compile("test_native_datasource").getPath
+      val library = RemoteNativeLibrary.load(worker.get.address, path, SPARK_VERSION)
+      val otherLibrary = RemoteNativeLibrary.load(other.address, path, SPARK_VERSION)
+      val source = library.createDataSource("native_range", Array.empty, Array.empty)
+      try {
+        val e = intercept[RuntimeException](otherLibrary.closeDataSource(source.handle))
+        assert(e.getMessage.contains("has no Source handle"), e.getMessage)
+      } finally {
+        library.closeDataSource(source.handle)
+      }
+      val create = Request.newBuilder()
+        .setCreate(Create.newBuilder().setLibrary(library.id).setName("native_range")).build()
+      val e = intercept[RuntimeException](RemoteNativeWorker.call(other.address, path, create))
+      val id = java.lang.Long.toUnsignedString(library.id)
+      assert(e.getMessage.contains(s"has no library $id"), e.getMessage)
+    } finally {
+      other.stop()
     }
   }
 
@@ -94,39 +119,26 @@ object NativeDataSourceRemoteWorkerSuite {
 
   private val writes = "it writes, and the worker only runs batch reads"
   private val streams = "it reads or writes a stream, and the worker only runs batch reads"
-  private val jvmOnly = "it does not call a library, so it does not depend on where libraries run"
-  private def alsoWrites(stops: String) =
-    s"after its batch reads, which pass with the worker, it $stops, and the worker only runs " +
-      "batch reads"
+  private val alsoWrites = "after reads that pass with the worker, it writes or reads a " +
+    "stream, and the worker only runs batch reads"
 
   /** The tests of the suite that do not run with a worker, with the reason. */
   private val notRun: Map[String, String] = Map(
     "batch write" -> writes,
-    "tables in a catalog" -> alsoWrites("inserts into a table"),
+    "tables in a catalog" -> alsoWrites,
     "abort a failed write" -> writes,
     "create no writer when computing the data to write fails" -> writes,
     "abort a write whose commit failed" -> writes,
     "abort a data writer whose commit failed" -> writes,
     "do not abort a data writer that committed with an invalid message" -> writes,
     "write with a session that is not the active one" -> writes,
-    "find installed libraries automatically" -> alsoWrites("writes"),
-    "pass the task to reads and data writers" -> alsoWrites("writes"),
-    "reject NULL handles" -> alsoWrites("reads a stream and writes"),
+    "find installed libraries automatically" -> alsoWrites,
+    "pass the task to reads and data writers" -> alsoWrites,
+    "reject NULL handles" -> alsoWrites,
     "abort a micro-batch whose write failed" -> streams,
     "streaming read and write" -> streams,
     "reject offsets that are not JSON on a single line" -> streams,
     "pass the ID of a streaming query to its stream writers" -> streams,
-    "parse manifests" -> jvmOnly,
-    "platform names" -> jvmOnly,
-    "fail clearly where the C data interface of Arrow Java does not load" -> jvmOnly,
-    "native library path" -> jvmOnly,
-    "tell missing functions from link errors" -> jvmOnly,
-    "close the previous stream writer of a streaming query" -> jvmOnly,
-    "the bindings match the layout of spark_datasource.h" -> jvmOnly,
-    "distribute a package without an active session" -> jvmOnly,
-    "add any file with the extension when native data sources are disabled" -> jvmOnly,
-    "add a read-only package as a writable artifact" -> jvmOnly,
-    "disable native data sources" -> jvmOnly,
     "native data sources require Java 22 or later" ->
       "it checks the error of a JVM that calls a library itself")
 }

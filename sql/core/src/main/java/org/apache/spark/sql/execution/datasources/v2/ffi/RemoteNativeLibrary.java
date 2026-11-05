@@ -59,7 +59,8 @@ final class RemoteNativeLibrary extends NativeDataSourceLibrary {
   private final String address;
   // The path of the library, which the worker loads, for the logs of the library.
   private final String path;
-  private final long id;
+  // The ID of the library in the worker.
+  final long id;
   private final int abiVersion;
   private final EnumSet<Function> functions = EnumSet.noneOf(Function.class);
 

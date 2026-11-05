@@ -54,7 +54,8 @@ private[ffi] object RemoteNativeWorker {
 
   private[ffi] lazy val interruptions =
     ThreadUtils.newDaemonSingleThreadScheduledExecutor("native-ds-remote-interruptions")
-  private[ffi] lazy val cancellations = ThreadUtils.newDaemonCachedThreadPool("native-ds-remote-cancel")
+  private[ffi] lazy val cancellations =
+    ThreadUtils.newDaemonCachedThreadPool("native-ds-remote-cancel")
 
   private def dispatcher(address: String): WorkerDispatcher = {
     dispatchers.computeIfAbsent(address, _ => {

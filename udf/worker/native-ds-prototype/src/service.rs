@@ -264,12 +264,13 @@ async fn read_session(
     out: Responses,
 ) {
     let interrupted = Arc::new(AtomicBool::new(false));
-    // One batch ahead of what the engine received, like a get_next that Spark has not asked for.
+    // Capacity 1: the read thread stays at most a batch ahead of the response stream, whose own
+    // buffer adds a few more.
     let (events_sender, mut events) = mpsc::channel::<Event>(1);
     let (opened_sender, opened) = oneshot::channel::<Result<ds::Reply, String>>();
     let (done_sender, mut done) = oneshot::channel::<Vec<ds::LogRecord>>();
-    // The read starts on Finish, when the engine asks for the data: GrpcWorkerSession drops an
-    // ErrorResponse that arrives before its process() is called.
+    // The read starts on Finish, when the engine asks for the data: GrpcWorkerSession cancels
+    // the session on an ErrorResponse that comes before its process() call, and loses the error.
     let (start_sender, start) = oneshot::channel::<()>();
     let mut start_sender = Some(start_sender);
     let flag = interrupted.clone();
@@ -332,7 +333,8 @@ async fn read_session(
                     interrupted.store(true, Ordering::SeqCst);
                     events.close();
                     start_sender.take();
-                    let _ = (&mut done).await;
+                    // The read thread releases the stream once a running get_next returns,
+                    // without keeping the engine waiting, as Spark does in process.
                     send(&out, cancel_response()).await;
                     return;
                 }
@@ -346,7 +348,6 @@ async fn read_session(
                     interrupted.store(true, Ordering::SeqCst);
                     events.close();
                     start_sender.take();
-                    let _ = (&mut done).await;
                     return protocol_violation(&mut inbound, &out, "a request other than Finish or Cancel").await;
                 }
             },
